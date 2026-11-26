@@ -108,7 +108,9 @@ export default function App() {
       setSpectating(false)
       await loadRoomData(created.id)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not create room.')
+  console.error('Create room error:', e)
+  setError(e instanceof Error ? e.message : JSON.stringify(e))
+}
     } finally {
       setBusy(false)
     }
