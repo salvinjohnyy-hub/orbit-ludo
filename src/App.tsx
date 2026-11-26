@@ -12,8 +12,13 @@ import {
 
 import {
   createRoomCode,
+  createInitialGameState,
+  getCurrentPlayer,
+  getLegalMoves,
+  moveToken,
   PLAYER_COLORS,
   rollDie,
+  type GameState,
   type Player,
   type PlayerColor
 } from './game'
@@ -33,17 +38,25 @@ type MessageRow = {
   body: string
 }
 
+type RoomRow = {
+  id: string
+  code: string
+  status: string
+  game_state: GameState | Record<string, never> | null
+}
+
 export default function App() {
   const [name, setName] = useState('')
   const [roomCode, setRoomCode] = useState('')
   const [room, setRoom] = useState('')
   const [roomId, setRoomId] = useState('')
+  const [playerId, setPlayerId] = useState('')
   const [players, setPlayers] = useState<Player[]>([])
   const [spectating, setSpectating] = useState(false)
   const [sound, setSound] = useState(true)
   const [chat, setChat] = useState<string[]>([])
   const [message, setMessage] = useState('')
-  const [die, setDie] = useState<number | null>(null)
+  const [gameState, setGameState] = useState<GameState | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [roomStatus, setRoomStatus] = useState('waiting')
@@ -52,18 +65,41 @@ export default function App() {
     ? `${window.location.origin}/?room=${room}`
     : ''
 
-  async function loadRoomData(id: string) {
-    const [playerResult, messageResult] = await Promise.all([
-      supabase
-        .from('room_players')
-        .select('id, display_name, color, is_spectator')
-        .eq('room_id', id),
+  const activePlayers = players.filter(p => !p.isSpectator)
+  const spectators = players.filter(p => p.isSpectator)
 
-      supabase
-        .from('room_messages')
-        .select('id, display_name, body')
-        .eq('room_id', id)
-    ])
+  const currentPlayer = gameState
+    ? getCurrentPlayer(gameState)
+    : null
+
+  const isMyTurn = Boolean(
+    currentPlayer && currentPlayer.id === playerId
+  )
+
+  const legalMoves =
+    gameState && gameState.diceValue !== null && isMyTurn
+      ? getLegalMoves(gameState, gameState.diceValue)
+      : []
+
+  async function loadRoomData(id: string) {
+    const [playerResult, messageResult, roomResult] =
+      await Promise.all([
+        supabase
+          .from('room_players')
+          .select('id, display_name, color, is_spectator')
+          .eq('room_id', id),
+
+        supabase
+          .from('room_messages')
+          .select('id, display_name, body')
+          .eq('room_id', id),
+
+        supabase
+          .from('rooms')
+          .select('id, code, status, game_state')
+          .eq('id', id)
+          .single()
+      ])
 
     if (playerResult.error) {
       setError(playerResult.error.message)
@@ -87,6 +123,46 @@ export default function App() {
         )
       )
     }
+
+    if (roomResult.error) {
+      setError(roomResult.error.message)
+    } else {
+      const r = roomResult.data as RoomRow
+      setRoomStatus(r.status)
+
+      if (
+        r.game_state &&
+        'players' in r.game_state &&
+        Array.isArray(r.game_state.players)
+      ) {
+        setGameState(r.game_state as GameState)
+      } else {
+        setGameState(null)
+      }
+    }
+  }
+
+  async function saveGameState(
+    nextState: GameState,
+    status = 'playing'
+  ) {
+    if (!roomId) return
+
+    const { error: saveError } = await supabase
+      .from('rooms')
+      .update({
+        game_state: nextState,
+        status
+      })
+      .eq('id', roomId)
+
+    if (saveError) {
+      setError(saveError.message)
+      return
+    }
+
+    setGameState(nextState)
+    setRoomStatus(status)
   }
 
   async function createGame() {
@@ -108,7 +184,7 @@ export default function App() {
 
       if (roomError) throw roomError
 
-      const { error: playerError } = await supabase
+      const { data: newPlayer, error: playerError } = await supabase
         .from('room_players')
         .insert({
           room_id: created.id,
@@ -116,20 +192,21 @@ export default function App() {
           color: PLAYER_COLORS[0],
           is_spectator: false
         })
+        .select('id')
+        .single()
 
       if (playerError) throw playerError
 
       setRoom(created.code)
       setRoomId(created.id)
+      setPlayerId(newPlayer.id)
       setRoomStatus(created.status)
       setSpectating(false)
 
       await loadRoomData(created.id)
     } catch (e) {
       console.error('Create room error:', e)
-      setError(
-        e instanceof Error ? e.message : JSON.stringify(e)
-      )
+      setError(e instanceof Error ? e.message : JSON.stringify(e))
     } finally {
       setBusy(false)
     }
@@ -155,10 +232,7 @@ export default function App() {
         .maybeSingle()
 
       if (findError) throw findError
-
-      if (!found) {
-        throw new Error('Room not found. Check the code.')
-      }
+      if (!found) throw new Error('Room not found. Check the code.')
 
       const { data: existing, error: existingError } = await supabase
         .from('room_players')
@@ -170,9 +244,11 @@ export default function App() {
       if (existingError) throw existingError
 
       let isSpectator = false
+      let joinedPlayerId = ''
 
       if (existing) {
         isSpectator = existing.is_spectator
+        joinedPlayerId = existing.id
       } else {
         const { count, error: countError } = await supabase
           .from('room_players')
@@ -188,7 +264,7 @@ export default function App() {
           throw new Error('This room already has 8 players.')
         }
 
-        const { error: insertError } = await supabase
+        const { data: inserted, error: insertError } = await supabase
           .from('room_players')
           .insert({
             room_id: found.id,
@@ -196,21 +272,108 @@ export default function App() {
             color: PLAYER_COLORS[(count ?? 0) % 8],
             is_spectator: isSpectator
           })
+          .select('id')
+          .single()
 
         if (insertError) throw insertError
+        joinedPlayerId = inserted.id
       }
 
       setRoom(found.code)
       setRoomId(found.id)
+      setPlayerId(joinedPlayerId)
       setRoomStatus(found.status)
       setSpectating(isSpectator)
 
       await loadRoomData(found.id)
     } catch (e) {
       console.error('Join room error:', e)
-      setError(
-        e instanceof Error ? e.message : 'Could not join room.'
+      setError(e instanceof Error ? e.message : 'Could not join room.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function startGame() {
+    if (activePlayers.length < 2) {
+      setError('At least 2 players are needed to start.')
+      return
+    }
+
+    if (activePlayers.length > 8) {
+      setError('Maximum 8 active players allowed.')
+      return
+    }
+
+    try {
+      setBusy(true)
+      setError('')
+
+      const nextState = createInitialGameState(activePlayers)
+      await saveGameState(nextState)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not start game.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function rollForTurn() {
+    if (!gameState || !isMyTurn || gameState.diceValue !== null) {
+      return
+    }
+
+    try {
+      setBusy(true)
+      setError('')
+
+      const roll = rollDie()
+      const moves = getLegalMoves(gameState, roll)
+
+      let nextState: GameState
+
+      if (moves.length === 0) {
+        nextState = {
+          ...gameState,
+          diceValue: null,
+          turnIndex:
+            roll === 6
+              ? gameState.turnIndex
+              : (gameState.turnIndex + 1) % gameState.players.length
+        }
+      } else {
+        nextState = {
+          ...gameState,
+          diceValue: roll
+        }
+      }
+
+      await saveGameState(nextState)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Dice roll failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function chooseToken(index: number) {
+    if (!gameState || !isMyTurn || gameState.diceValue === null) {
+      return
+    }
+
+    try {
+      setBusy(true)
+      setError('')
+
+      const nextState = moveToken(
+        gameState,
+        index,
+        gameState.diceValue
       )
+
+      await saveGameState(nextState)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Token could not move.')
     } finally {
       setBusy(false)
     }
@@ -269,6 +432,29 @@ export default function App() {
           ])
         }
       )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'rooms',
+          filter: `id=eq.${roomId}`
+        },
+        (payload) => {
+          const updated = payload.new as RoomRow
+          setRoomStatus(updated.status)
+
+          if (
+            updated.game_state &&
+            'players' in updated.game_state &&
+            Array.isArray(updated.game_state.players)
+          ) {
+            setGameState(updated.game_state as GameState)
+          } else {
+            setGameState(null)
+          }
+        }
+      )
       .subscribe()
 
     return () => {
@@ -286,14 +472,6 @@ export default function App() {
     }
   }, [])
 
-  const activePlayers = players.filter(
-    p => !p.isSpectator
-  )
-
-  const spectators = players.filter(
-    p => p.isSpectator
-  )
-
   return (
     <main className="shell">
       <header className="topbar">
@@ -304,6 +482,7 @@ export default function App() {
         <button
           className="icon-button"
           onClick={() => setSound(v => !v)}
+          aria-label="Toggle sound"
         >
           {sound ? <Volume2 /> : <VolumeX />}
         </button>
@@ -327,9 +506,7 @@ export default function App() {
 
         {!room ? (
           <div className="entry-card">
-            <label htmlFor="player-name">
-              YOUR PLAYER NAME
-            </label>
+            <label htmlFor="player-name">YOUR PLAYER NAME</label>
 
             <input
               id="player-name"
@@ -369,24 +546,18 @@ export default function App() {
               </button>
             </div>
 
-            {error && (
-              <p className="error-text">{error}</p>
-            )}
+            {error && <p className="error-text">{error}</p>}
           </div>
         ) : (
           <div className="entry-card room-card">
             <div className="room-heading">
               <span className="live-dot" />
-              {roomStatus === 'waiting'
-                ? 'ROOM LOBBY'
-                : 'GAME IN PROGRESS'}
+              {roomStatus === 'waiting' ? 'ROOM LOBBY' : 'GAME IN PROGRESS'}
             </div>
 
             <div className="room-code">{room}</div>
 
-            <p>
-              Share this invitation link with your friends.
-            </p>
+            <p>Share this invitation link with your friends.</p>
 
             <button
               className="primary"
@@ -410,138 +581,173 @@ export default function App() {
                   className={`player-chip ${p.color}`}
                 >
                   {p.name}
+                  {p.id === playerId ? ' · you' : ''}
                   {p.isSpectator ? ' · watching' : ''}
                 </span>
               ))}
             </div>
 
+            {roomStatus === 'waiting' && !spectating && (
+              <button
+                className="primary"
+                onClick={startGame}
+                disabled={busy || activePlayers.length < 2}
+              >
+                {busy ? 'Starting...' : 'Start Ludo'}
+              </button>
+            )}
+
             <div className="room-note">
-              Multiplayer lobby and chat connected.
-              Full Ludo gameplay is still being developed.
+              {roomStatus === 'waiting'
+                ? 'Waiting for players to join.'
+                : 'The game is in progress.'}
             </div>
 
-            {error && (
-              <p className="error-text">{error}</p>
-            )}
+            {error && <p className="error-text">{error}</p>}
           </div>
         )}
       </section>
 
-      <section className="preview">
-        <div className="section-head">
-          <div>
-            <span className="eyebrow">THE GAME</span>
-            <h2>One board. Your crew.</h2>
-          </div>
-
-          <span className="player-count">2–8 PLAYERS</span>
-        </div>
-
-        <div className="board-wrap">
-          <div className="board">
-            {PLAYER_COLORS.slice(0, 4).map((color, i) => (
-              <div
-                key={color}
-                className={`home home-${i}`}
-              >
-                <div className="home-inner">
-                  {[0, 1, 2, 3].map(n => (
-                    <i key={n} />
-                  ))}
-                </div>
-              </div>
-            ))}
-
-            <div className="cross">
-              <span className="tri red-tri" />
-              <span className="tri blue-tri" />
-              <span className="tri green-tri" />
-              <span className="tri yellow-tri" />
-            </div>
-
-            <div className="center-star">✦</div>
-          </div>
-        </div>
-
-        <div className="feature-row">
-          <div>
-            <Dice5 />
-            <b>Classic Ludo</b>
-            <small>Six to leave home</small>
-          </div>
-
-          <div>
-            <Users />
-            <b>Up to 8 players</b>
-            <small>Adaptive player setup</small>
-          </div>
-
-          <div>
-            <MessageCircle />
-            <b>Live chat</b>
-            <small>Talk while you play</small>
-          </div>
-        </div>
-      </section>
-
-      {room && (
+      {gameState && (
         <section className="game-preview">
           <div className="section-head">
             <div>
-              <span className="eyebrow">TABLE PREVIEW</span>
-              <h2>
-                {spectating ? 'Spectator view' : 'Room chat'}
-              </h2>
+              <span className="eyebrow">LIVE GAME</span>
+              <h2>Orbit Ludo table</h2>
             </div>
+            <span className="player-count">
+              {gameState.players.length} PLAYERS
+            </span>
           </div>
 
           <div className="game-panel">
-            <div
-              className="die"
-              onClick={() => setDie(rollDie())}
-            >
-              {die ?? '🎲'}
+            <div style={{
+              textAlign: 'center',
+              padding: '12px 0'
+            }}>
+              <h3 style={{ margin: '0 0 8px' }}>
+                {gameState.winnerId
+                  ? `${gameState.players.find(p => p.id === gameState.winnerId)?.name ?? 'Player'} wins!`
+                  : `${currentPlayer?.name ?? 'Waiting'}'s turn`}
+              </h3>
+
+              <p style={{ color: '#aeb5c8', fontSize: 13 }}>
+                {spectating
+                  ? 'You are watching this game.'
+                  : isMyTurn
+                    ? gameState.diceValue === null
+                      ? 'Roll the dice to play.'
+                      : 'Choose one of your highlighted tokens.'
+                    : 'Waiting for the current player.'}
+              </p>
+
+              <button
+                className="die"
+                onClick={rollForTurn}
+                disabled={
+                  busy ||
+                  spectating ||
+                  !isMyTurn ||
+                  gameState.diceValue !== null ||
+                  Boolean(gameState.winnerId)
+                }
+                style={{
+                  border: 0,
+                  margin: '18px auto',
+                  opacity:
+                    !isMyTurn || gameState.diceValue !== null ? 0.6 : 1
+                }}
+              >
+                {gameState.diceValue ?? <Dice5 size={36} />}
+              </button>
+
+              {gameState.diceValue !== null && isMyTurn && (
+                <p style={{ color: '#aaa4ff' }}>
+                  You rolled {gameState.diceValue}
+                </p>
+              )}
             </div>
 
-            <p>
-              {die
-                ? `You rolled a ${die}. Local preview only.`
-                : 'Tap the dice for a preview roll.'}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+              gap: 12,
+              marginTop: 16
+            }}>
+              {gameState.players.map(player => (
+                <div
+                  key={player.id}
+                  style={{
+                    background: '#11192a',
+                    border: `1px solid ${player.color === currentPlayer?.color ? '#aaa4ff' : '#ffffff20'}`,
+                    borderRadius: 12,
+                    padding: 14
+                  }}
+                >
+                  <strong>{player.name}</strong>
+                  {player.id === currentPlayer?.id && (
+                    <span style={{ color: '#aaa4ff', fontSize: 11 }}>
+                      {' '}· TURN
+                    </span>
+                  )}
+
+                  <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(4, 1fr)',
+                    gap: 8,
+                    marginTop: 12
+                  }}>
+                    {(gameState.tokens[player.id] ?? []).map(
+                      (position, index) => {
+                        const canMove =
+                          player.id === playerId &&
+                          legalMoves.includes(index) &&
+                          !spectating &&
+                          !busy
+
+                        return (
+                          <button
+                            key={index}
+                            onClick={() => chooseToken(index)}
+                            disabled={!canMove}
+                            style={{
+                              minHeight: 55,
+                              borderRadius: 10,
+                              border: canMove
+                                ? '2px solid #aaa4ff'
+                                : '1px solid #ffffff20',
+                              background: canMove ? '#343052' : '#1b2338',
+                              color: '#fff',
+                              cursor: canMove ? 'pointer' : 'default',
+                              fontWeight: 700
+                            }}
+                          >
+                            {position === -1
+                              ? 'HOME'
+                              : position === 62
+                                ? '🏆'
+                                : position >= 56
+                                  ? `F${position - 55}`
+                                  : `T${position + 1}`}
+                          </button>
+                        )
+                      }
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <p style={{
+              color: '#929bb0',
+              fontSize: 11,
+              textAlign: 'center',
+              marginTop: 18
+            }}>
+              HOME = waiting to leave · T = track · F = final lane
             </p>
 
+            {error && <p className="error-text">{error}</p>}
+
             <div className="chat-box">
-              <strong>Room chat</strong>
-
-              <div className="chat-lines">
-                {chat.map((line, i) => (
-                  <div key={i}>{line}</div>
-                ))}
-              </div>
-
-              <div className="chat-input">
-                <input
-                  value={message}
-                  onChange={e => setMessage(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter') {
-                      void sendMessage()
-                    }
-                  }}
-                  placeholder="Write a message..."
-                />
-
-                <button onClick={sendMessage}>
-                  Send
-                </button>
-              </div>
-            </div>
-          </div>
-        </section>
-      )}
-
-      <footer>
-        ORBIT LUDO <span>·</span> A LITTLE FRIENDLY CHAOS
-      </footer>
-    </main>
-  )
-}
+              <strong><MessageCircle size={15} /> Room chat</st
