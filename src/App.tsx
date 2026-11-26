@@ -750,4 +750,4 @@ export default function App() {
             {error && <p className="error-text">{error}</p>}
 
             <div className="chat-box">
-              <strong><MessageCircle size={15} /> Room chat</st
+              <strong><MessageCircle size={15} /> Room chat</strong>
