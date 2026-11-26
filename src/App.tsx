@@ -42,7 +42,7 @@ type RoomRow = {
   id: string
   code: string
   status: string
-  game_state: GameState | Record<string, never> | null
+  game_state: GameState | null
 }
 
 export default function App() {
@@ -130,12 +130,13 @@ export default function App() {
       const r = roomResult.data as RoomRow
       setRoomStatus(r.status)
 
+      const savedState = r.game_state as GameState | null
+
       if (
-        r.game_state &&
-        'players' in r.game_state &&
-        Array.isArray(r.game_state.players)
+        savedState &&
+        Array.isArray(savedState.players)
       ) {
-        setGameState(r.game_state as GameState)
+        setGameState(savedState)
       } else {
         setGameState(null)
       }
@@ -423,7 +424,7 @@ export default function App() {
           table: 'room_messages',
           filter: `room_id=eq.${roomId}`
         },
-        (payload) => {
+        payload => {
           const m = payload.new as MessageRow
 
           setChat(items => [
@@ -440,16 +441,17 @@ export default function App() {
           table: 'rooms',
           filter: `id=eq.${roomId}`
         },
-        (payload) => {
+        payload => {
           const updated = payload.new as RoomRow
           setRoomStatus(updated.status)
 
+          const savedState = updated.game_state as GameState | null
+
           if (
-            updated.game_state &&
-            'players' in updated.game_state &&
-            Array.isArray(updated.game_state.players)
+            savedState &&
+            Array.isArray(savedState.players)
           ) {
-            setGameState(updated.game_state as GameState)
+            setGameState(savedState)
           } else {
             setGameState(null)
           }
@@ -462,6 +464,7 @@ export default function App() {
     }
   }, [roomId])
 
+  
   useEffect(() => {
     const invitedRoom = new URLSearchParams(
       window.location.search
@@ -615,16 +618,19 @@ export default function App() {
               <span className="eyebrow">LIVE GAME</span>
               <h2>Orbit Ludo table</h2>
             </div>
+
             <span className="player-count">
               {gameState.players.length} PLAYERS
             </span>
           </div>
 
           <div className="game-panel">
-            <div style={{
-              textAlign: 'center',
-              padding: '12px 0'
-            }}>
+            <div
+              style={{
+                textAlign: 'center',
+                padding: '12px 0'
+              }}
+            >
               <h3 style={{ margin: '0 0 8px' }}>
                 {gameState.winnerId
                   ? `${gameState.players.find(p => p.id === gameState.winnerId)?.name ?? 'Player'} wins!`
@@ -668,12 +674,14 @@ export default function App() {
               )}
             </div>
 
-            <div style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
-              gap: 12,
-              marginTop: 16
-            }}>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+                gap: 12,
+                marginTop: 16
+              }}
+            >
               {gameState.players.map(player => (
                 <div
                   key={player.id}
@@ -685,18 +693,21 @@ export default function App() {
                   }}
                 >
                   <strong>{player.name}</strong>
+
                   {player.id === currentPlayer?.id && (
                     <span style={{ color: '#aaa4ff', fontSize: 11 }}>
                       {' '}· TURN
                     </span>
                   )}
 
-                  <div style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'repeat(4, 1fr)',
-                    gap: 8,
-                    marginTop: 12
-                  }}>
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(4, 1fr)',
+                      gap: 8,
+                      marginTop: 12
+                    }}
+                  >
                     {(gameState.tokens[player.id] ?? []).map(
                       (position, index) => {
                         const canMove =
@@ -738,16 +749,52 @@ export default function App() {
               ))}
             </div>
 
-            <p style={{
-              color: '#929bb0',
-              fontSize: 11,
-              textAlign: 'center',
-              marginTop: 18
-            }}>
+            <p
+              style={{
+                color: '#929bb0',
+                fontSize: 11,
+                textAlign: 'center',
+                marginTop: 18
+              }}
+            >
               HOME = waiting to leave · T = track · F = final lane
             </p>
 
             {error && <p className="error-text">{error}</p>}
 
             <div className="chat-box">
-              <strong><MessageCircle size={15} /> Room chat</strong>
+              <strong>
+                <MessageCircle size={15} /> Room chat
+              </strong>
+
+              <div className="chat-messages">
+                {chat.map((item, index) => (
+                  <p key={index}>{item}</p>
+                ))}
+              </div>
+
+              <form
+                className="chat-form"
+                onSubmit={e => {
+                  e.preventDefault()
+                  void sendMessage()
+                }}
+              >
+                <input
+                  value={message}
+                  onChange={e => setMessage(e.target.value)}
+                  placeholder="Write a message..."
+                  maxLength={200}
+                />
+
+                <button type="submit" disabled={!message.trim()}>
+                  Send
+                </button>
+              </form>
+            </div>
+          </div>
+        </section>
+      )}
+    </main>
+  )
+}
