@@ -1,5 +1,4 @@
-
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Copy,
   Dice5,
@@ -7,7 +6,8 @@ import {
   Plus,
   Users,
   Volume2,
-  VolumeX
+  VolumeX,
+  X
 } from 'lucide-react'
 
 import {
@@ -55,8 +55,14 @@ export default function App() {
   const [players, setPlayers] = useState<Player[]>([])
   const [spectating, setSpectating] = useState(false)
   const [sound, setSound] = useState(true)
-  const [chat, setChat] = useState<string[]>([])
+
+  const [chat, setChat] = useState<MessageRow[]>([])
   const [message, setMessage] = useState('')
+  const [chatOpen, setChatOpen] = useState(false)
+  const [unreadCount, setUnreadCount] = useState(0)
+  const ownMessageIds = useRef<Set<string>>(new Set())
+  const chatEndRef = useRef<HTMLDivElement | null>(null)
+
   const [gameState, setGameState] = useState<GameState | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -77,10 +83,36 @@ export default function App() {
     currentPlayer && currentPlayer.id === playerId
   )
 
+  const isPlaying = Boolean(
+    gameState && roomStatus === 'playing'
+  )
+
   const legalMoves =
     gameState && gameState.diceValue !== null && isMyTurn
       ? getLegalMoves(gameState, gameState.diceValue)
       : []
+
+  function receiveMessage(m: MessageRow) {
+    if (!m?.id) return
+
+    setChat(items => {
+      if (items.some(item => item.id === m.id)) return items
+      return [...items, m]
+    })
+
+    if (!ownMessageIds.current.has(m.id) && !chatOpen) {
+      setUnreadCount(count => count + 1)
+    }
+  }
+
+  function openChat() {
+    setChatOpen(true)
+    setUnreadCount(0)
+  }
+
+  function closeChat() {
+    setChatOpen(false)
+  }
 
   async function loadRoomData(id: string) {
     const [playerResult, messageResult, roomResult] =
@@ -119,9 +151,7 @@ export default function App() {
       setError(messageResult.error.message)
     } else {
       setChat(
-        (messageResult.data ?? []).map(
-          (m: MessageRow) => `${m.display_name}: ${m.body}`
-        )
+        (messageResult.data ?? []) as MessageRow[]
       )
     }
 
@@ -389,22 +419,53 @@ export default function App() {
     const body = message.trim()
     setMessage('')
 
-    const { error: sendError } = await supabase
+    const { data, error: sendError } = await supabase
       .from('room_messages')
       .insert({
         room_id: roomId,
         display_name: name.trim() || 'Guest',
         body
       })
+      .select('id, display_name, body')
+      .single()
 
-    if (sendError) setError(sendError.message)
+    if (sendError) {
+      setError(sendError.message)
+      setMessage(body)
+      return
+    }
+
+    const sentMessage = data as MessageRow
+    ownMessageIds.current.add(sentMessage.id)
+    receiveMessage(sentMessage)
+
+    const channel = supabase.channel(`room-${roomId}`)
+    void channel.send({
+      type: 'broadcast',
+      event: 'new-message',
+      payload: sentMessage
+    })
   }
 
   useEffect(() => {
     if (!roomId) return
 
+    let active = true
+
     const channel = supabase
-      .channel(`room-${roomId}`)
+      .channel(`room-${roomId}`, {
+        config: {
+          broadcast: { self: false }
+        }
+      })
+      .on(
+        'broadcast',
+        { event: 'new-message' },
+        payload => {
+          if (!active) return
+          receiveMessage(payload.payload as MessageRow)
+        }
+      )
       .on(
         'postgres_changes',
         {
@@ -426,11 +487,8 @@ export default function App() {
           filter: `room_id=eq.${roomId}`
         },
         payload => {
-          const m = payload.new as MessageRow
-          setChat(items => [
-            ...items,
-            `${m.display_name}: ${m.body}`
-          ])
+          if (!active) return
+          receiveMessage(payload.new as MessageRow)
         }
       )
       .on(
@@ -453,164 +511,181 @@ export default function App() {
           }
         }
       )
-      .subscribe()
+      .subscribe(status => {
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          setError('Live connection problem. Check your internet connection.')
+        }
+      })
 
     return () => {
+      active = false
       void supabase.removeChannel(channel)
     }
   }, [roomId])
-
-  useEffect(() => {
-    const invitedRoom = new URLSearchParams(
-      window.location.search
-    ).get('room')
-
-    if (invitedRoom) {
-      setRoomCode(invitedRoom.toUpperCase())
-    }
-  }, [])
-
   return (
-    <main className="shell">
-      <header className="topbar">
-        <a className="brand" href="#">
-          <span className="brand-mark">✦</span> ORBIT <b>LUDO</b>
-        </a>
+    <main className={`shell ${isPlaying ? 'playing-shell' : ''}`}>
+      {!isPlaying && (
+        <header className="topbar">
+          <a className="brand" href="#">
+            <span className="brand-mark">✦</span> ORBIT <b>LUDO</b>
+          </a>
 
-        <button
-          className="icon-button"
-          onClick={() => setSound(v => !v)}
-          aria-label="Toggle sound"
-        >
-          {sound ? <Volume2 /> : <VolumeX />}
-        </button>
-      </header>
+          <button
+            className="icon-button"
+            onClick={() => setSound(v => !v)}
+            aria-label="Toggle sound"
+          >
+            {sound ? <Volume2 /> : <VolumeX />}
+          </button>
+        </header>
+      )}
 
-      <section className="hero">
-        <div className="eyebrow">
-          <span /> THE CLASSIC, REIMAGINED
-        </div>
+      {!isPlaying && (
+        <section className="hero">
+          <div className="eyebrow">
+            <span /> THE CLASSIC, REIMAGINED
+          </div>
 
-        <h1>
-          Roll. Race.
-          <br />
-          <em>Rule the board.</em>
-        </h1>
+          <h1>
+            Roll. Race.
+            <br />
+            <em>Rule the board.</em>
+          </h1>
 
-        <p>
-          Bring your people together for a little friendly chaos.
-          Invite up to eight players.
-        </p>
+          <p>
+            Bring your people together for a little friendly chaos.
+            Invite up to eight players.
+          </p>
 
-        {!room ? (
-          <div className="entry-card">
-            <label htmlFor="player-name">YOUR PLAYER NAME</label>
+          {!room ? (
+            <div className="entry-card">
+              <label htmlFor="player-name">YOUR PLAYER NAME</label>
 
-            <input
-              id="player-name"
-              value={name}
-              onChange={e => setName(e.target.value)}
-              placeholder="Enter your name"
-              maxLength={18}
-            />
-
-            <button
-              className="primary"
-              onClick={createGame}
-              disabled={busy}
-            >
-              <Plus size={18} />
-              {busy ? 'Creating...' : 'Create a room'}
-            </button>
-
-            <div className="or">
-              <span /> OR JOIN A ROOM <span />
-            </div>
-
-            <div className="join-row">
               <input
-                value={roomCode}
-                onChange={e => setRoomCode(e.target.value)}
-                placeholder="Enter room code"
-                maxLength={8}
+                id="player-name"
+                value={name}
+                onChange={e => setName(e.target.value)}
+                placeholder="Enter your name"
+                maxLength={18}
               />
 
               <button
-                className="secondary"
-                onClick={joinGame}
+                className="primary"
+                onClick={createGame}
                 disabled={busy}
               >
-                Join
+                <Plus size={18} />
+                {busy ? 'Creating...' : 'Create a room'}
               </button>
-            </div>
 
-            {error && <p className="error-text">{error}</p>}
-          </div>
-        ) : (
-          <div className="entry-card room-card">
-            <div className="room-heading">
-              <span className="live-dot" />
-              {roomStatus === 'waiting' ? 'ROOM LOBBY' : 'GAME IN PROGRESS'}
-            </div>
+              <div className="or">
+                <span /> OR JOIN A ROOM <span />
+              </div>
 
-            <div className="room-code">{room}</div>
+              <div className="join-row">
+                <input
+                  value={roomCode}
+                  onChange={e => setRoomCode(e.target.value)}
+                  placeholder="Enter room code"
+                  maxLength={8}
+                />
 
-            <p>Share this invitation link with your friends.</p>
-
-            <button
-              className="primary"
-              onClick={() => {
-                void navigator.clipboard.writeText(shareUrl)
-              }}
-            >
-              <Copy size={17} />
-              Copy invitation link
-            </button>
-
-            <div className="room-meta">
-              <Users size={16} />
-              {activePlayers.length} players · {spectators.length} spectators
-            </div>
-
-            <div className="player-list">
-              {players.map(p => (
-                <span
-                  key={p.id}
-                  className={`player-chip ${p.color}`}
+                <button
+                  className="secondary"
+                  onClick={joinGame}
+                  disabled={busy}
                 >
-                  {p.name}
-                  {p.id === playerId ? ' · you' : ''}
-                  {p.isSpectator ? ' · watching' : ''}
-                </span>
-              ))}
-            </div>
+                  Join
+                </button>
+              </div>
 
-            {roomStatus === 'waiting' && !spectating && (
+              {error && <p className="error-text">{error}</p>}
+            </div>
+          ) : (
+            <div className="entry-card room-card">
+              <div className="room-heading">
+                <span className="live-dot" />
+                {roomStatus === 'waiting' ? 'ROOM LOBBY' : 'GAME IN PROGRESS'}
+              </div>
+
+              <div className="room-code">{room}</div>
+
+              <p>Share this invitation link with your friends.</p>
+
               <button
                 className="primary"
-                onClick={startGame}
-                disabled={busy || activePlayers.length < 2}
+                onClick={() => {
+                  void navigator.clipboard.writeText(shareUrl)
+                }}
               >
-                {busy ? 'Starting...' : 'Start Ludo'}
+                <Copy size={17} />
+                Copy invitation link
               </button>
-            )}
 
-            <div className="room-note">
-              {roomStatus === 'waiting'
-                ? 'Waiting for players to join.'
-                : 'The game is in progress.'}
+              <div className="room-meta">
+                <Users size={16} />
+                {activePlayers.length} players · {spectators.length} spectators
+              </div>
+
+              <div className="player-list">
+                {players.map(p => (
+                  <span
+                    key={p.id}
+                    className={`player-chip ${p.color}`}
+                  >
+                    {p.name}
+                    {p.id === playerId ? ' · you' : ''}
+                    {p.isSpectator ? ' · watching' : ''}
+                  </span>
+                ))}
+              </div>
+
+              {roomStatus === 'waiting' && !spectating && (
+                <button
+                  className="primary"
+                  onClick={startGame}
+                  disabled={busy || activePlayers.length < 2}
+                >
+                  {busy ? 'Starting...' : 'Start Ludo'}
+                </button>
+              )}
+
+              <div className="room-note">
+                {roomStatus === 'waiting'
+                  ? 'Waiting for players to join.'
+                  : 'The game is in progress.'}
+              </div>
+
+              {error && <p className="error-text">{error}</p>}
             </div>
-
-            {error && <p className="error-text">{error}</p>}
-          </div>
-        )}
-      </section>
+          )}
+        </section>
+      )}
 
       {gameState && (
-        <section className="game-preview">
+        <section
+          className="game-preview"
+          style={
+            isPlaying
+              ? {
+                  position: 'fixed',
+                  inset: 0,
+                  zIndex: 20,
+                  width: '100%',
+                  height: '100dvh',
+                  maxWidth: 'none',
+                  margin: 0,
+                  padding: '12px',
+                  boxSizing: 'border-box',
+                  overflowY: 'auto',
+                  background: '#101322'
+                }
+              : undefined
+          }
+        >
           <div className="section-head">
             <div>
-              <span className="eyebrow">LIVE GAME</span>
+              <span className="eyebrow">LIVE GAME · ROOM {room}</span>
               <h2>Orbit Ludo table</h2>
             </div>
 
@@ -673,16 +748,147 @@ export default function App() {
             />
 
             {error && <p className="error-text">{error}</p>}
+          </div>
+        </section>
+      )}
 
-            <div className="chat-box">
-              <strong>
-                <MessageCircle size={15} /> Room chat
-              </strong>
+      {room && gameState && (
+        <>
+          <button
+            type="button"
+            onClick={() => {
+              if (chatOpen) {
+                closeChat()
+              } else {
+                openChat()
+              }
+            }}
+            aria-label="Open room chat"
+            style={{
+              position: 'fixed',
+              right: 20,
+              bottom: 20,
+              zIndex: 60,
+              width: 58,
+              height: 58,
+              borderRadius: '50%',
+              border: '2px solid rgba(255,255,255,0.2)',
+              background: '#7565f5',
+              color: 'white',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              boxShadow: '0 8px 30px rgba(0,0,0,0.4)',
+              cursor: 'pointer'
+            }}
+          >
+            {chatOpen ? <X size={25} /> : <MessageCircle size={25} />}
 
-              <div className="chat-messages">
-                {chat.map((item, index) => (
-                  <p key={index}>{item}</p>
+            {!chatOpen && unreadCount > 0 && (
+              <span
+                style={{
+                  position: 'absolute',
+                  top: -5,
+                  right: -5,
+                  minWidth: 21,
+                  height: 21,
+                  padding: '0 5px',
+                  borderRadius: 20,
+                  background: '#f04452',
+                  color: 'white',
+                  fontSize: 12,
+                  fontWeight: 800,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  border: '2px solid #101322'
+                }}
+              >
+                {unreadCount > 9 ? '9+' : unreadCount}
+              </span>
+            )}
+          </button>
+
+          {chatOpen && (
+            <div
+              style={{
+                position: 'fixed',
+                right: 16,
+                bottom: 90,
+                zIndex: 60,
+                width: 'min(350px, calc(100vw - 32px))',
+                height: 'min(440px, calc(100dvh - 120px))',
+                background: '#20243a',
+                border: '1px solid rgba(255,255,255,0.14)',
+                borderRadius: 18,
+                boxShadow: '0 15px 50px rgba(0,0,0,0.5)',
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden'
+              }}
+            >
+              <div
+                style={{
+                  padding: '15px 17px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  borderBottom: '1px solid rgba(255,255,255,0.1)',
+                  color: 'white'
+                }}
+              >
+                <strong style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <MessageCircle size={18} />
+                  Room chat
+                </strong>
+
+                <button
+                  type="button"
+                  onClick={closeChat}
+                  aria-label="Close chat"
+                  style={{
+                    background: 'transparent',
+                    color: 'white',
+                    border: 0,
+                    cursor: 'pointer'
+                  }}
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div
+                className="chat-messages"
+                style={{
+                  flex: 1,
+                  overflowY: 'auto',
+                  padding: 14
+                }}
+              >
+                {chat.length === 0 && (
+                  <p style={{ color: '#aeb5c8', textAlign: 'center' }}>
+                    No messages yet. Say hello!
+                  </p>
+                )}
+
+                {chat.map(item => (
+                  <div
+                    key={item.id}
+                    style={{
+                      marginBottom: 12,
+                      overflowWrap: 'anywhere'
+                    }}
+                  >
+                    <strong style={{ color: '#aaa4ff', fontSize: 12 }}>
+                      {item.display_name}
+                    </strong>
+                    <p style={{ color: 'white', margin: '3px 0 0' }}>
+                      {item.body}
+                    </p>
+                  </div>
                 ))}
+
+                <div ref={chatEndRef} />
               </div>
 
               <form
@@ -691,12 +897,19 @@ export default function App() {
                   e.preventDefault()
                   void sendMessage()
                 }}
+                style={{
+                  display: 'flex',
+                  gap: 8,
+                  padding: 12,
+                  borderTop: '1px solid rgba(255,255,255,0.1)'
+                }}
               >
                 <input
                   value={message}
                   onChange={e => setMessage(e.target.value)}
                   placeholder="Write a message..."
                   maxLength={200}
+                  style={{ flex: 1, minWidth: 0 }}
                 />
 
                 <button type="submit" disabled={!message.trim()}>
@@ -704,9 +917,24 @@ export default function App() {
                 </button>
               </form>
             </div>
-          </div>
-        </section>
+          )}
+        </>
       )}
     </main>
   )
 }
+  useEffect(() => {
+    const invitedRoom = new URLSearchParams(
+      window.location.search
+    ).get('room')
+
+    if (invitedRoom) {
+      setRoomCode(invitedRoom.toUpperCase())
+    }
+  }, [])
+
+  useEffect(() => {
+    if (chatOpen) {
+      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [chat, chatOpen])
