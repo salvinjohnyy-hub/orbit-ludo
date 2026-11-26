@@ -23,7 +23,7 @@ import {
   type PlayerColor
 } from './game'
 
-import { supabase } from './supabase'
+import LudoBoard from './LudoBoard'
 
 type PlayerRow = {
   id: string
