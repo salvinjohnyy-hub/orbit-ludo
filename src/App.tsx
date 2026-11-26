@@ -23,6 +23,7 @@ import {
   type PlayerColor
 } from './game'
 
+import { supabase } from './supabase'
 import LudoBoard from './LudoBoard'
 
 type PlayerRow = {
@@ -130,12 +131,8 @@ export default function App() {
       const r = roomResult.data as RoomRow
       setRoomStatus(r.status)
 
-      const savedState = r.game_state as GameState | null
-
-      if (
-        savedState &&
-        Array.isArray(savedState.players)
-      ) {
+      const savedState = r.game_state
+      if (savedState && Array.isArray(savedState.players)) {
         setGameState(savedState)
       } else {
         setGameState(null)
@@ -206,8 +203,8 @@ export default function App() {
 
       await loadRoomData(created.id)
     } catch (e) {
-      console.error('Create room error:', e)
-      setError(e instanceof Error ? e.message : JSON.stringify(e))
+      console.error(e)
+      setError(e instanceof Error ? e.message : 'Could not create room.')
     } finally {
       setBusy(false)
     }
@@ -288,7 +285,7 @@ export default function App() {
 
       await loadRoomData(found.id)
     } catch (e) {
-      console.error('Join room error:', e)
+      console.error(e)
       setError(e instanceof Error ? e.message : 'Could not join room.')
     } finally {
       setBusy(false)
@@ -320,9 +317,12 @@ export default function App() {
   }
 
   async function rollForTurn() {
-    if (!gameState || !isMyTurn || gameState.diceValue !== null) {
-      return
-    }
+    if (
+      !gameState ||
+      !isMyTurn ||
+      gameState.diceValue !== null ||
+      spectating
+    ) return
 
     try {
       setBusy(true)
@@ -358,9 +358,12 @@ export default function App() {
   }
 
   async function chooseToken(index: number) {
-    if (!gameState || !isMyTurn || gameState.diceValue === null) {
-      return
-    }
+    if (
+      !gameState ||
+      !isMyTurn ||
+      gameState.diceValue === null ||
+      spectating
+    ) return
 
     try {
       setBusy(true)
@@ -394,9 +397,7 @@ export default function App() {
         body
       })
 
-    if (sendError) {
-      setError(sendError.message)
-    }
+    if (sendError) setError(sendError.message)
   }
 
   useEffect(() => {
@@ -426,7 +427,6 @@ export default function App() {
         },
         payload => {
           const m = payload.new as MessageRow
-
           setChat(items => [
             ...items,
             `${m.display_name}: ${m.body}`
@@ -445,12 +445,8 @@ export default function App() {
           const updated = payload.new as RoomRow
           setRoomStatus(updated.status)
 
-          const savedState = updated.game_state as GameState | null
-
-          if (
-            savedState &&
-            Array.isArray(savedState.players)
-          ) {
+          const savedState = updated.game_state
+          if (savedState && Array.isArray(savedState.players)) {
             setGameState(savedState)
           } else {
             setGameState(null)
@@ -464,7 +460,6 @@ export default function App() {
     }
   }, [roomId])
 
-  
   useEffect(() => {
     const invitedRoom = new URLSearchParams(
       window.location.search
@@ -625,12 +620,7 @@ export default function App() {
           </div>
 
           <div className="game-panel">
-            <div
-              style={{
-                textAlign: 'center',
-                padding: '12px 0'
-              }}
-            >
+            <div style={{ textAlign: 'center', padding: '12px 0' }}>
               <h3 style={{ margin: '0 0 8px' }}>
                 {gameState.winnerId
                   ? `${gameState.players.find(p => p.id === gameState.winnerId)?.name ?? 'Player'} wins!`
@@ -674,91 +664,13 @@ export default function App() {
               )}
             </div>
 
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
-                gap: 12,
-                marginTop: 16
-              }}
-            >
-              {gameState.players.map(player => (
-                <div
-                  key={player.id}
-                  style={{
-                    background: '#11192a',
-                    border: `1px solid ${player.color === currentPlayer?.color ? '#aaa4ff' : '#ffffff20'}`,
-                    borderRadius: 12,
-                    padding: 14
-                  }}
-                >
-                  <strong>{player.name}</strong>
-
-                  {player.id === currentPlayer?.id && (
-                    <span style={{ color: '#aaa4ff', fontSize: 11 }}>
-                      {' '}· TURN
-                    </span>
-                  )}
-
-                  <div
-                    style={{
-                      display: 'grid',
-                      gridTemplateColumns: 'repeat(4, 1fr)',
-                      gap: 8,
-                      marginTop: 12
-                    }}
-                  >
-                    {(gameState.tokens[player.id] ?? []).map(
-                      (position, index) => {
-                        const canMove =
-                          player.id === playerId &&
-                          legalMoves.includes(index) &&
-                          !spectating &&
-                          !busy
-
-                        return (
-                          <button
-                            key={index}
-                            onClick={() => chooseToken(index)}
-                            disabled={!canMove}
-                            style={{
-                              minHeight: 55,
-                              borderRadius: 10,
-                              border: canMove
-                                ? '2px solid #aaa4ff'
-                                : '1px solid #ffffff20',
-                              background: canMove ? '#343052' : '#1b2338',
-                              color: '#fff',
-                              cursor: canMove ? 'pointer' : 'default',
-                              fontWeight: 700
-                            }}
-                          >
-                            {position === -1
-                              ? 'HOME'
-                              : position === 62
-                                ? '🏆'
-                                : position >= 56
-                                  ? `F${position - 55}`
-                                  : `T${position + 1}`}
-                          </button>
-                        )
-                      }
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <p
-              style={{
-                color: '#929bb0',
-                fontSize: 11,
-                textAlign: 'center',
-                marginTop: 18
-              }}
-            >
-              HOME = waiting to leave · T = track · F = final lane
-            </p>
+            <LudoBoard
+              gameState={gameState}
+              playerId={playerId}
+              legalMoves={legalMoves}
+              isMyTurn={isMyTurn && !spectating && !busy}
+              onTokenClick={chooseToken}
+            />
 
             {error && <p className="error-text">{error}</p>}
 
