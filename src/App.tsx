@@ -1,4 +1,3 @@
-
 import { useEffect, useRef, useState } from 'react'
 import {
   Copy,
@@ -453,9 +452,7 @@ export default function App() {
         payload: sentMessage
       })
     }
-  }
-
-  // Load an invitation room code from the URL.
+  }  // Load an invitation room code from the URL.
   useEffect(() => {
     const invitedRoom = new URLSearchParams(
       window.location.search
@@ -778,7 +775,8 @@ export default function App() {
               legalMoves={legalMoves}
               isMyTurn={isMyTurn && !spectating && !busy}
               onTokenClick={chooseToken}
-            /          </div>
+            />
+          </div>
         </section>
       )}
 
