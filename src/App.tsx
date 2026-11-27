@@ -1,3 +1,4 @@
+
 import { useEffect, useRef, useState } from 'react'
 import {
   Copy,
@@ -55,21 +56,20 @@ export default function App() {
   const [players, setPlayers] = useState<Player[]>([])
   const [spectating, setSpectating] = useState(false)
   const [sound, setSound] = useState(true)
-
   const [chat, setChat] = useState<MessageRow[]>([])
   const [message, setMessage] = useState('')
   const [chatOpen, setChatOpen] = useState(false)
   const [unreadCount, setUnreadCount] = useState(0)
-
-  const ownMessageIds = useRef<Set<string>>(new Set())
-  const chatOpenRef = useRef(false)
-  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
-  const chatEndRef = useRef<HTMLDivElement | null>(null)
-
   const [gameState, setGameState] = useState<GameState | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [roomStatus, setRoomStatus] = useState('waiting')
+
+  const ownMessageIds = useRef<Set<string>>(new Set())
+  const receivedMessageIds = useRef<Set<string>>(new Set())
+  const chatEndRef = useRef<HTMLDivElement | null>(null)
+  const chatOpenRef = useRef(false)
+  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
 
   const shareUrl = room
     ? `${window.location.origin}/?room=${room}`
@@ -95,21 +95,14 @@ export default function App() {
       ? getLegalMoves(gameState, gameState.diceValue)
       : []
 
-  function receiveMessage(incoming: MessageRow) {
-    if (!incoming?.id) return
+  function receiveMessage(m: MessageRow) {
+    if (!m?.id || receivedMessageIds.current.has(m.id)) return
 
-    setChat(items => {
-      if (items.some(item => item.id === incoming.id)) {
-        return items
-      }
+    receivedMessageIds.current.add(m.id)
 
-      return [...items, incoming]
-    })
+    setChat(items => [...items, m])
 
-    if (
-      !ownMessageIds.current.has(incoming.id) &&
-      !chatOpenRef.current
-    ) {
+    if (!ownMessageIds.current.has(m.id) && !chatOpenRef.current) {
       setUnreadCount(count => count + 1)
     }
   }
@@ -161,31 +154,23 @@ export default function App() {
     if (messageResult.error) {
       setError(messageResult.error.message)
     } else {
-      setChat(previous => {
-        const combined = [...previous]
+      const loadedMessages = (messageResult.data ?? []) as MessageRow[]
 
-        for (const item of (messageResult.data ?? []) as MessageRow[]) {
-          if (!combined.some(existing => existing.id === item.id)) {
-            combined.push(item)
-          }
-        }
-
-        return combined
+      loadedMessages.forEach(m => {
+        receivedMessageIds.current.add(m.id)
       })
+
+      setChat(loadedMessages)
     }
 
     if (roomResult.error) {
       setError(roomResult.error.message)
     } else {
-      const savedRoom = roomResult.data as RoomRow
+      const r = roomResult.data as RoomRow
+      setRoomStatus(r.status)
 
-      setRoomStatus(savedRoom.status)
-
-      if (
-        savedRoom.game_state &&
-        Array.isArray(savedRoom.game_state.players)
-      ) {
-        setGameState(savedRoom.game_state)
+      if (r.game_state && Array.isArray(r.game_state.players)) {
+        setGameState(r.game_state)
       } else {
         setGameState(null)
       }
@@ -256,9 +241,7 @@ export default function App() {
       await loadRoomData(created.id)
     } catch (e) {
       console.error(e)
-      setError(
-        e instanceof Error ? e.message : 'Could not create room.'
-      )
+      setError(e instanceof Error ? e.message : 'Could not create room.')
     } finally {
       setBusy(false)
     }
@@ -340,9 +323,7 @@ export default function App() {
       await loadRoomData(found.id)
     } catch (e) {
       console.error(e)
-      setError(
-        e instanceof Error ? e.message : 'Could not join room.'
-      )
+      setError(e instanceof Error ? e.message : 'Could not join room.')
     } finally {
       setBusy(false)
     }
@@ -366,9 +347,7 @@ export default function App() {
       const nextState = createInitialGameState(activePlayers)
       await saveGameState(nextState)
     } catch (e) {
-      setError(
-        e instanceof Error ? e.message : 'Could not start game.'
-      )
+      setError(e instanceof Error ? e.message : 'Could not start game.')
     } finally {
       setBusy(false)
     }
@@ -398,8 +377,7 @@ export default function App() {
           turnIndex:
             roll === 6
               ? gameState.turnIndex
-              : (gameState.turnIndex + 1) %
-                gameState.players.length
+              : (gameState.turnIndex + 1) % gameState.players.length
         }
       } else {
         nextState = {
@@ -436,9 +414,7 @@ export default function App() {
 
       await saveGameState(nextState)
     } catch (e) {
-      setError(
-        e instanceof Error ? e.message : 'Token could not move.'
-      )
+      setError(e instanceof Error ? e.message : 'Token could not move.')
     } finally {
       setBusy(false)
     }
@@ -467,12 +443,11 @@ export default function App() {
     }
 
     const sentMessage = data as MessageRow
-
     ownMessageIds.current.add(sentMessage.id)
     receiveMessage(sentMessage)
 
     if (channelRef.current) {
-      await channelRef.current.send({
+      void channelRef.current.send({
         type: 'broadcast',
         event: 'new-message',
         payload: sentMessage
@@ -480,6 +455,25 @@ export default function App() {
     }
   }
 
+  // Load an invitation room code from the URL.
+  useEffect(() => {
+    const invitedRoom = new URLSearchParams(
+      window.location.search
+    ).get('room')
+
+    if (invitedRoom) {
+      setRoomCode(invitedRoom.toUpperCase())
+    }
+  }, [])
+
+  // Keep the chat scrolled to the newest message.
+  useEffect(() => {
+    if (chatOpen) {
+      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [chat, chatOpen])
+
+  // Live room updates.
   useEffect(() => {
     if (!roomId) return
 
@@ -534,7 +528,6 @@ export default function App() {
         },
         payload => {
           const updated = payload.new as RoomRow
-
           setRoomStatus(updated.status)
 
           if (
@@ -548,16 +541,12 @@ export default function App() {
         }
       )
       .subscribe(status => {
-        if (status === 'SUBSCRIBED') {
-          channelRef.current = channel
-        }
-
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-          setError(
-            'Live connection problem. Check your internet connection.'
-          )
+          setError('Live connection problem. Check your internet connection.')
         }
       })
+
+    channelRef.current = channel
 
     return () => {
       active = false
@@ -566,160 +555,144 @@ export default function App() {
     }
   }, [roomId])
 
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({
-      behavior: 'smooth',
-      block: 'end'
-    })
-  }, [chat, chatOpen])
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    const invitedRoom = params.get('room')
-
-    if (invitedRoom) {
-      setRoomCode(invitedRoom.toUpperCase())
-    }
-  }, [])  return (
+  return (
     <main className={`shell ${isPlaying ? 'playing-shell' : ''}`}>
       {!isPlaying && (
-        <>
-          <header className="topbar">
-            <a className="brand" href="#">
-              <span className="brand-mark">✦</span> ORBIT <b>LUDO</b>
-            </a>
+        <header className="topbar">
+          <a className="brand" href="#">
+            <span className="brand-mark">✦</span> ORBIT <b>LUDO</b>
+          </a>
 
-            <button
-              className="icon-button"
-              onClick={() => setSound(value => !value)}
-              aria-label="Toggle sound"
-            >
-              {sound ? <Volume2 /> : <VolumeX />}
-            </button>
-          </header>
+          <button
+            className="icon-button"
+            onClick={() => setSound(v => !v)}
+            aria-label="Toggle sound"
+          >
+            {sound ? <Volume2 /> : <VolumeX />}
+          </button>
+        </header>
+      )}
 
-          <section className="hero">
-            <div className="eyebrow">
-              <span /> THE CLASSIC, REIMAGINED
-            </div>
+      {!isPlaying && (
+        <section className="hero">
+          <div className="eyebrow">
+            <span /> THE CLASSIC, REIMAGINED
+          </div>
 
-            <h1>
-              Roll. Race.
-              <br />
-              <em>Rule the board.</em>
-            </h1>
+          <h1>
+            Roll. Race.
+            <br />
+            <em>Rule the board.</em>
+          </h1>
 
-            <p>
-              Bring your people together for a little friendly chaos.
-              Invite up to eight players.
-            </p>
+          <p>
+            Bring your people together for a little friendly chaos.
+            Invite up to eight players.
+          </p>
 
-            {!room ? (
-              <div className="entry-card">
-                <label htmlFor="player-name">YOUR PLAYER NAME</label>
+          {!room ? (
+            <div className="entry-card">
+              <label htmlFor="player-name">YOUR PLAYER NAME</label>
 
+              <input
+                id="player-name"
+                value={name}
+                onChange={e => setName(e.target.value)}
+                placeholder="Enter your name"
+                maxLength={18}
+              />
+
+              <button
+                className="primary"
+                onClick={createGame}
+                disabled={busy}
+              >
+                <Plus size={18} />
+                {busy ? 'Creating...' : 'Create a room'}
+              </button>
+
+              <div className="or">
+                <span /> OR JOIN A ROOM <span />
+              </div>
+
+              <div className="join-row">
                 <input
-                  id="player-name"
-                  value={name}
-                  onChange={event => setName(event.target.value)}
-                  placeholder="Enter your name"
-                  maxLength={18}
+                  value={roomCode}
+                  onChange={e => setRoomCode(e.target.value)}
+                  placeholder="Enter room code"
+                  maxLength={8}
                 />
 
                 <button
-                  className="primary"
-                  onClick={createGame}
+                  className="secondary"
+                  onClick={joinGame}
                   disabled={busy}
                 >
-                  <Plus size={18} />
-                  {busy ? 'Creating...' : 'Create a room'}
+                  Join
                 </button>
-
-                <div className="or">
-                  <span /> OR JOIN A ROOM <span />
-                </div>
-
-                <div className="join-row">
-                  <input
-                    value={roomCode}
-                    onChange={event => setRoomCode(event.target.value)}
-                    placeholder="Enter room code"
-                    maxLength={8}
-                  />
-
-                  <button
-                    className="secondary"
-                    onClick={joinGame}
-                    disabled={busy}
-                  >
-                    Join
-                  </button>
-                </div>
-
-                {error && <p className="error-text">{error}</p>}
               </div>
-            ) : (
-              <div className="entry-card room-card">
-                <div className="room-heading">
-                  <span className="live-dot" />
-                  {roomStatus === 'waiting'
-                    ? 'ROOM LOBBY'
-                    : 'GAME IN PROGRESS'}
-                </div>
 
-                <div className="room-code">{room}</div>
+              {error && <p className="error-text">{error}</p>}
+            </div>
+          ) : (
+            <div className="entry-card room-card">
+              <div className="room-heading">
+                <span className="live-dot" />
+                {roomStatus === 'waiting' ? 'ROOM LOBBY' : 'GAME IN PROGRESS'}
+              </div>
 
-                <p>Share this invitation link with your friends.</p>
+              <div className="room-code">{room}</div>
 
+              <p>Share this invitation link with your friends.</p>
+
+              <button
+                className="primary"
+                onClick={() => {
+                  void navigator.clipboard.writeText(shareUrl)
+                }}
+              >
+                <Copy size={17} />
+                Copy invitation link
+              </button>
+
+              <div className="room-meta">
+                <Users size={16} />
+                {activePlayers.length} players · {spectators.length} spectators
+              </div>
+
+              <div className="player-list">
+                {players.map(p => (
+                  <span
+                    key={p.id}
+                    className={`player-chip ${p.color}`}
+                  >
+                    {p.name}
+                    {p.id === playerId ? ' · you' : ''}
+                    {p.isSpectator ? ' · watching' : ''}
+                  </span>
+                ))}
+              </div>
+
+              {roomStatus === 'waiting' && !spectating && (
                 <button
                   className="primary"
-                  onClick={() => {
-                    void navigator.clipboard.writeText(shareUrl)
-                  }}
+                  onClick={startGame}
+                  disabled={busy || activePlayers.length < 2}
                 >
-                  <Copy size={17} />
-                  Copy invitation link
+                  {busy ? 'Starting...' : 'Start Ludo'}
                 </button>
+              )}
 
-                <div className="room-meta">
-                  <Users size={16} />
-                  {activePlayers.length} players · {spectators.length} spectators
-                </div>
-
-                <div className="player-list">
-                  {players.map(player => (
-                    <span
-                      key={player.id}
-                      className={`player-chip ${player.color}`}
-                    >
-                      {player.name}
-                      {player.id === playerId ? ' · you' : ''}
-                      {player.isSpectator ? ' · watching' : ''}
-                    </span>
-                  ))}
-                </div>
-
-                {roomStatus === 'waiting' && !spectating && (
-                  <button
-                    className="primary"
-                    onClick={startGame}
-                    disabled={busy || activePlayers.length < 2}
-                  >
-                    {busy ? 'Starting...' : 'Start Ludo'}
-                  </button>
-                )}
-
-                <div className="room-note">
-                  {roomStatus === 'waiting'
-                    ? 'Waiting for players to join.'
-                    : 'The game is in progress.'}
-                </div>
-
-                {error && <p className="error-text">{error}</p>}
+              <div className="room-note">
+                {roomStatus === 'waiting'
+                  ? 'Waiting for players to join.'
+                  : 'The game is in progress.'}
               </div>
-            )}
-          </section>
-        </>
+
+              {error && <p className="error-text">{error}</p>}
+            </div>
+          )}
+        </section>
       )}
 
       {gameState && (
@@ -745,9 +718,7 @@ export default function App() {
         >
           <div className="section-head">
             <div>
-              <span className="eyebrow">
-                LIVE GAME · ROOM {room}
-              </span>
+              <span className="eyebrow">LIVE GAME · ROOM {room}</span>
               <h2>Orbit Ludo table</h2>
             </div>
 
@@ -760,11 +731,7 @@ export default function App() {
             <div style={{ textAlign: 'center', padding: '12px 0' }}>
               <h3 style={{ margin: '0 0 8px' }}>
                 {gameState.winnerId
-                  ? `${
-                      gameState.players.find(
-                        player => player.id === gameState.winnerId
-                      )?.name ?? 'Player'
-                    } wins!`
+                  ? `${gameState.players.find(p => p.id === gameState.winnerId)?.name ?? 'Player'} wins!`
                   : `${currentPlayer?.name ?? 'Waiting'}'s turn`}
               </h3>
 
@@ -774,7 +741,7 @@ export default function App() {
                   : isMyTurn
                     ? gameState.diceValue === null
                       ? 'Roll the dice to play.'
-                      : 'Choose one of your tokens.'
+                      : 'Choose one of your highlighted tokens.'
                     : 'Waiting for the current player.'}
               </p>
 
@@ -811,10 +778,7 @@ export default function App() {
               legalMoves={legalMoves}
               isMyTurn={isMyTurn && !spectating && !busy}
               onTokenClick={chooseToken}
-            />
-
-            {error && <p className="error-text">{error}</p>}
-          </div>
+            /          </div>
         </section>
       )}
 
@@ -844,7 +808,7 @@ export default function App() {
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              boxShadow: '0 5px 25px rgba(0,0,0,0.35)',
+              boxShadow: '0 8px 30px rgba(0,0,0,0.4)',
               cursor: 'pointer'
             }}
           >
@@ -860,9 +824,9 @@ export default function App() {
                   height: 21,
                   padding: '0 5px',
                   borderRadius: 20,
-                  background: '#ff354f',
+                  background: '#f04452',
                   color: 'white',
-                  fontSize: 11,
+                  fontSize: 12,
                   fontWeight: 800,
                   display: 'flex',
                   alignItems: 'center',
@@ -879,44 +843,43 @@ export default function App() {
             <div
               style={{
                 position: 'fixed',
-                right: 18,
+                right: 16,
                 bottom: 90,
-                zIndex: 59,
-                width: 'min(350px, calc(100vw - 36px))',
-                height: 'min(440px, 65dvh)',
+                zIndex: 60,
+                width: 'min(350px, calc(100vw - 32px))',
+                height: 'min(440px, calc(100dvh - 120px))',
+                background: '#20243a',
+                border: '1px solid rgba(255,255,255,0.14)',
+                borderRadius: 18,
+                boxShadow: '0 15px 50px rgba(0,0,0,0.5)',
                 display: 'flex',
                 flexDirection: 'column',
-                borderRadius: 18,
-                overflow: 'hidden',
-                background: '#20243a',
-                border: '1px solid rgba(255,255,255,0.12)',
-                boxShadow: '0 12px 40px rgba(0,0,0,0.45)'
+                overflow: 'hidden'
               }}
             >
               <div
                 style={{
-                  padding: '14px 16px',
+                  padding: '15px 17px',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'space-between',
-                  background: '#292d47',
+                  borderBottom: '1px solid rgba(255,255,255,0.1)',
                   color: 'white'
                 }}
               >
-                <div>
-                  <strong>Room chat</strong>
-                  <div style={{ fontSize: 11, color: '#aeb5c8' }}>
-                    {activePlayers.length} players online
-                  </div>
-                </div>
+                <strong style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <MessageCircle size={18} />
+                  Room chat
+                </strong>
 
                 <button
+                  type="button"
                   onClick={closeChat}
                   aria-label="Close chat"
                   style={{
-                    border: 0,
                     background: 'transparent',
                     color: 'white',
+                    border: 0,
                     cursor: 'pointer'
                   }}
                 >
@@ -925,24 +888,15 @@ export default function App() {
               </div>
 
               <div
+                className="chat-messages"
                 style={{
                   flex: 1,
                   overflowY: 'auto',
-                  padding: 12,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 9
+                  padding: 14
                 }}
               >
                 {chat.length === 0 && (
-                  <p
-                    style={{
-                      textAlign: 'center',
-                      color: '#aeb5c8',
-                      fontSize: 13,
-                      marginTop: 25
-                    }}
-                  >
+                  <p style={{ color: '#aeb5c8', textAlign: 'center' }}>
                     No messages yet. Say hello!
                   </p>
                 )}
@@ -951,31 +905,17 @@ export default function App() {
                   <div
                     key={item.id}
                     style={{
-                      alignSelf:
-                        item.display_name === (name.trim() || 'Guest')
-                          ? 'flex-end'
-                          : 'flex-start',
-                      maxWidth: '85%',
-                      padding: '9px 12px',
-                      borderRadius: 12,
-                      background:
-                        item.display_name === (name.trim() || 'Guest')
-                          ? '#6254d9'
-                          : '#343950',
-                      color: 'white',
+                      marginBottom: 12,
                       overflowWrap: 'anywhere'
                     }}
                   >
-                    <div
-                      style={{
-                        fontSize: 10,
-                        opacity: 0.75,
-                        marginBottom: 3
-                      }}
-                    >
+                    <strong style={{ color: '#aaa4ff', fontSize: 12 }}>
                       {item.display_name}
-                    </div>
-                    <div style={{ fontSize: 13 }}>{item.body}</div>
+                    </strong>
+
+                    <p style={{ color: 'white', margin: '3px 0 0' }}>
+                      {item.body}
+                    </p>
                   </div>
                 ))}
 
@@ -983,47 +923,27 @@ export default function App() {
               </div>
 
               <form
-                onSubmit={event => {
-                  event.preventDefault()
+                className="chat-form"
+                onSubmit={e => {
+                  e.preventDefault()
                   void sendMessage()
                 }}
                 style={{
                   display: 'flex',
-                  gap: 7,
-                  padding: 10,
-                  background: '#292d47'
+                  gap: 8,
+                  padding: 12,
+                  borderTop: '1px solid rgba(255,255,255,0.1)'
                 }}
               >
                 <input
                   value={message}
-                  onChange={event => setMessage(event.target.value)}
+                  onChange={e => setMessage(e.target.value)}
                   placeholder="Write a message..."
-                  maxLength={300}
-                  style={{
-                    flex: 1,
-                    minWidth: 0,
-                    padding: '11px 12px',
-                    borderRadius: 10,
-                    border: '1px solid #464b66',
-                    outline: 'none',
-                    background: '#171a2a',
-                    color: 'white'
-                  }}
+                  maxLength={200}
+                  style={{ flex: 1, minWidth: 0 }}
                 />
 
-                <button
-                  type="submit"
-                  disabled={!message.trim()}
-                  style={{
-                    padding: '0 15px',
-                    border: 0,
-                    borderRadius: 10,
-                    background: '#7565f5',
-                    color: 'white',
-                    fontWeight: 700,
-                    cursor: 'pointer'
-                  }}
-                >
+                <button type="submit" disabled={!message.trim()}>
                   Send
                 </button>
               </form>
